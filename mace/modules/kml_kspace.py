@@ -1,5 +1,14 @@
 """KML's plane-wave k-space term as a MACE long-range block.
 
+Written by Mathieu Istas (``istasm``), in the patched MACE clone that
+accompanies his ``kspace-gradient-descent`` work (KML_Model PR #47).
+That clone was never under version control, so this file entered the
+repository as a whole-file add and ``git blame`` credits the commit
+that captured it rather than its author. Of the 407 lines here, 358
+are his; what was added on top is the short-range pair block, the
+freeze and warm-start plumbing, the ``r_max`` guard, and the single
+guarded ``kml`` import.
+
 MACE learns the short range through message passing on a graph cut at
 ``r_max``; the plane-wave basis of the KML potential is periodic and has
 no cutoff, so it carries what the graph cannot see.  Both terms are
@@ -36,12 +45,23 @@ from mace.modules.models import ScaleShiftMACE
 from mace.modules.utils import get_outputs, safe_double
 
 
-def _import_kspace_energy():
-    """``kml.torch_kspace.KSpaceEnergy``, or an error that says how to get it."""
+# MACE positions are in angstrom; KML's pair functions take bohr.
+BOHR_PER_ANG = 1.0 / 0.529177210903   # CODATA 2018, kml/units.py
+
+
+def _import_kml():
+    """``KSpaceEnergy`` and ``generate_kvectors``, or an error saying how to get them.
+
+    Both live in ``kml`` and both are needed to build a block, so both are
+    imported here: an unguarded ``import kml`` anywhere else in the module
+    would raise a bare ``ModuleNotFoundError`` first and this message would
+    never be seen.
+    """
     try:
+        from kml.kvectors import generate_kvectors
         from kml.torch_kspace import KSpaceEnergy
 
-        return KSpaceEnergy
+        return KSpaceEnergy, generate_kvectors
     except ImportError as exc:
         raise ImportError(
             "Cannot import 'kml', which holds the plane-wave k-space basis. "
@@ -112,15 +132,15 @@ class KSpaceLongRangeBlock(torch.nn.Module):
         k2cut_triplet: Optional[int] = None,
         include_constant: bool = False,
         dtype: Optional[torch.dtype] = None,
+        nsrbf: int = 1,
+        rcut: Optional[float] = None,
     ):
         super().__init__()
         # The block joins a model whose other parameters are already in
         # the run's dtype; a float64 island here would promote every
         # energy it touches and quietly change what the loss is computed in.
         dtype = torch.get_default_dtype() if dtype is None else dtype
-        from kml.kvectors import generate_kvectors
-
-        kspace_energy_cls = _import_kspace_energy()
+        kspace_energy_cls, generate_kvectors = _import_kml()
 
         self.nup = int(nup)
         self.k2cut = k2cut
@@ -134,16 +154,32 @@ class KSpaceLongRangeBlock(torch.nn.Module):
             k2cut_triplet=k2cut_triplet,
             verbose=False,
         )
+        # KML's short-range pair block (nsrbf > 1), evaluated on MACE's
+        # edge list with distances converted to bohr, so the published
+        # K coefficients load with the energy unit factor alone.
+        short_range = None
+        if nsrbf > 1:
+            if rcut is None:
+                raise ValueError("a short-range block (kml_nsrbf > 1) needs kml_rcut, in bohr")
+            from kml.torch_kspace import ShortRangeBasis
+            short_range = ShortRangeBasis(nsrbf, rcut, dtype=dtype)
+        self.nsrbf = int(nsrbf)
+        self.rcut = float(rcut) if rcut is not None else None
         self.energy = kspace_energy_cls(
-            kvdata, dtype=dtype, include_constant=include_constant
+            kvdata, dtype=dtype, include_constant=include_constant,
+            short_range=short_range,
         )
+        # Kept so a warm start can compare its bundle's table with this one.
+        self.kvdata = kvdata
         self.n_2body = len(kvdata.shells)
         self.n_triplet = len(kvdata.triplet_shells)
 
         logging.info(
             f"KML k-space block: nup={nup} "
             f"k2cut={k2cut if k2cut is not None else (nup + 1) ** 2}, "
-            f"{self.n_2body} 2-body shells + {self.n_triplet} triplet shells "
+            + (f"{nsrbf - 1} short-range pair functions (rcut {rcut} bohr) + "
+               if nsrbf > 1 else "")
+            + f"{self.n_2body} 2-body shells + {self.n_triplet} triplet shells "
             f"= {self.energy.n_features} coefficients"
             + (" + constant" if include_constant else "")
         )
@@ -152,10 +188,12 @@ class KSpaceLongRangeBlock(torch.nn.Module):
     def n_features(self) -> int:
         return self.energy.n_features
 
-    def features(self, positions, batch, cell, num_graphs) -> torch.Tensor:
+    def features(self, positions, batch, cell, num_graphs,
+                 edge_index=None, shifts=None) -> torch.Tensor:
         """Standardized basis features, ``[n_graphs, n_features]``."""
         ell = cubic_side_lengths(cell, num_graphs)
-        return self.energy.features(positions, batch, ell, num_graphs)
+        return self.energy.features(positions, batch, ell, num_graphs,
+                                    edge_index, shifts, BOHR_PER_ANG)
 
     def forward(
         self,
@@ -163,10 +201,13 @@ class KSpaceLongRangeBlock(torch.nn.Module):
         batch: torch.Tensor,
         cell: torch.Tensor,
         num_graphs: int,
+        edge_index: Optional[torch.Tensor] = None,
+        shifts: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """``energy[n_graphs]``, in the units the coefficients carry (eV)."""
         ell = cubic_side_lengths(cell, num_graphs)
-        return self.energy(positions, batch, ell, num_graphs)
+        return self.energy(positions, batch, ell, num_graphs,
+                           edge_index, shifts, BOHR_PER_ANG)
 
 
 def set_kspace_feature_statistics(
@@ -186,6 +227,10 @@ def set_kspace_feature_statistics(
 
     Runs under ``no_grad`` over ``data_loader`` (all of it unless
     ``max_batches`` is given) and writes the two buffers on ``block``.
+    MACE builds its training loader with ``drop_last``, so the last
+    partial batch (up to batch_size - 1 frames, which ones depends on
+    the seed) is left out of the statistics; at 1219 training frames
+    and batch 10 that shifts the mean by about 0.04 meV/atom.
     ``device`` defaults to the one the block already sits on, which is
     where its buffers are: at build time that is still the CPU.
     """
@@ -201,11 +246,14 @@ def set_kspace_feature_statistics(
                 break
             batch = batch.to(device)
             num_graphs = int(batch.ptr.numel() - 1)
-            features = block.energy.basis(
+            features = block.energy.raw_features(
                 batch.positions,
                 batch.batch,
                 cubic_side_lengths(batch.cell, num_graphs),
                 num_graphs,
+                batch.edge_index,
+                batch.shifts,
+                BOHR_PER_ANG,
             ).to(torch.float64)
             sums += features.sum(dim=0)
             sums_squared += (features * features).sum(dim=0)
@@ -326,7 +374,8 @@ class KMLMACE(ScaleShiftMACE):
         positions = data["positions"]
         num_graphs = int(data["ptr"].numel() - 1)
         kspace_energy = self.kml_kspace(
-            positions, data["batch"], data["cell"], num_graphs
+            positions, data["batch"], data["cell"], num_graphs,
+            data["edge_index"], data["shifts"],
         )
 
         interaction_energy = outputs["interaction_energy"] + kspace_energy
