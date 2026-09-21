@@ -36,6 +36,11 @@ from .extensions import (
     TimeReversalSymmetrizedMACE,
 )
 from .gate import GatedEquivariantBlock
+from .kml_kspace import (
+    KMLMACE,
+    KSpaceLongRangeBlock,
+    set_kspace_feature_statistics,
+)
 from .loss import (
     DipolePolarLoss,
     DipoleSingleLoss,
@@ -121,6 +126,9 @@ __all__ = [
     "MACE",
     "ScaleShiftMACE",
     "MACELES",
+    "KMLMACE",
+    "KSpaceLongRangeBlock",
+    "set_kspace_feature_statistics",
     "AtomicDipolesMACE",
     "AtomicDielectricMACE",
     "EnergyDipolesMACE",

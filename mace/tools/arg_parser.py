@@ -140,6 +140,7 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "ScaleShiftMACE",
             "PolarMACE",
             "MACELES",
+            "KMLMACE",
             "ScaleShiftBOTNet",
             "AtomicDipolesMACE",
             "AtomicDielectricMACE",
@@ -532,6 +533,66 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         help="Path to the LES arguments file",
         type=read_yaml,
         default=None,
+        required=False,
+    )
+    # KML plane-wave k-space term (--model KMLMACE). The basis is fixed by
+    # nup and the |k|^2 cutoffs; its coefficients train alongside MACE's
+    # weights from the same loss. mace/modules/kml_kspace.py.
+    parser.add_argument(
+        "--kml_nup",
+        help="KMLMACE: largest integer k-vector component (kml's nup)",
+        type=int,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_k2cut",
+        help="KMLMACE: single-tier |k|^2 cutoff in integer units "
+        "(default (kml_nup+1)**2, kml's Fortran-equivalent tables)",
+        type=int,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_k2cut_pair",
+        help="KMLMACE: |k|^2 cutoff for the 2-body shells (two-tier tables; "
+        "not to be combined with --kml_k2cut)",
+        type=int,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_k2cut_triplet",
+        help="KMLMACE: |k|^2 cutoff for the triplet shells (two-tier tables; "
+        "must be >= --kml_k2cut_pair)",
+        type=int,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_include_constant",
+        help="KMLMACE: give the k-space term its own constant energy offset. "
+        "Off by default: --E0s already carries one, and with a single "
+        "species at fixed N the two are the same parameter",
+        type=str2bool,
+        default=False,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_lr_factor",
+        help="KMLMACE: learning rate of the k-space coefficients, as a "
+        "multiple of --lr",
+        type=float,
+        default=1.0,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_normalize_features",
+        help="KMLMACE: standardize the k-space features on the training set "
+        "before training. A change of variables, not of model, and what "
+        "lets the coefficients share MACE's learning rate",
+        type=str2bool,
+        default=True,
         required=False,
     )
     parser.add_argument(

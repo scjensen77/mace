@@ -1029,6 +1029,20 @@ def get_params_options(
             }
         )
 
+    # The KML k-space coefficients. Their own group and their own rate:
+    # they are linear coefficients of standardized features, not network
+    # weights, so the rate that suits the message-passing blocks is not
+    # necessarily the one that suits them (--kml_lr_factor).
+    if getattr(model, "kml_kspace", None) is not None:
+        param_options["params"].append(
+            {
+                "name": "kml_kspace",
+                "params": list(model.kml_kspace.parameters()),
+                "weight_decay": 0.0,
+                "lr": getattr(args, "kml_lr_factor", 1.0) * args.lr,
+            }
+        )
+
     if (
         hasattr(model, "onebody_magmombasis_coeffs")
         and args.train_one_body_contribution

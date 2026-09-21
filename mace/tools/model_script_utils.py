@@ -212,6 +212,12 @@ def configure_model(
 
     model = _build_model(args, model_config, model_config_foundation, heads)
 
+    if isinstance(model, modules.KMLMACE) and args.kml_normalize_features:
+        # Measured on the training set, before the first step, and stored
+        # as buffers so a restart reads them back rather than remeasuring
+        # on whatever loader it happens to hold.
+        modules.set_kspace_feature_statistics(model.kml_kspace, train_loader)
+
     if model_foundation is not None:
         if getattr(args, "finetune_dipoles_polarizabilities", False):
             # MDP fine-tuning: dedicated loader that handles higher-order irreps
@@ -243,6 +249,37 @@ def _determine_atomic_inter_shift(mean, heads):
         return [mean] * len(heads)
     logging.info("Mean not in correct format, using default value of 0.0")
     return [0.0] * len(heads)
+
+
+def _kml_kspace_arguments(args):
+    """``KSpaceLongRangeBlock`` arguments from the ``--kml_*`` flags.
+
+    Refuses here rather than in the block so a mistyped basis costs a
+    line, not a data load: ``--kml_nup`` is what fixes the k-vector
+    tables, and the single-tier and two-tier cutoffs are alternatives
+    (``kml.generate_kvectors`` refuses the mixture too).
+    """
+    if args.kml_nup is None:
+        raise ValueError(
+            "--model KMLMACE needs --kml_nup: it sets the largest integer "
+            "k-vector component, and with it the number of plane-wave "
+            "coefficients to train. Try --kml_nup 1 (3 pair shells + 3 "
+            "triplet shells) before anything larger."
+        )
+    if args.kml_k2cut is not None and (
+        args.kml_k2cut_pair is not None or args.kml_k2cut_triplet is not None
+    ):
+        raise ValueError(
+            "specify either --kml_k2cut or the two-tier "
+            "--kml_k2cut_pair / --kml_k2cut_triplet, not both"
+        )
+    return dict(
+        nup=args.kml_nup,
+        k2cut=args.kml_k2cut,
+        k2cut_pair=args.kml_k2cut_pair,
+        k2cut_triplet=args.kml_k2cut_triplet,
+        include_constant=args.kml_include_constant,
+    )
 
 
 def _parse_literal_or_none(value):
@@ -310,6 +347,26 @@ def _build_model(
             use_embedding_readout=args.use_embedding_readout,
             use_last_readout_only=args.use_last_readout_only,
             use_agnostic_product=args.use_agnostic_product,
+        )
+    if args.model == "KMLMACE":
+        return modules.KMLMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=[0.0] * len(heads),
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            embedding_specs=args.embedding_specs,
+            use_embedding_readout=args.use_embedding_readout,
+            use_last_readout_only=args.use_last_readout_only,
+            use_agnostic_product=args.use_agnostic_product,
+            kml_kspace_arguments=_kml_kspace_arguments(args),
         )
     if args.model == "ScaleShiftMACE":
         return modules.ScaleShiftMACE(
