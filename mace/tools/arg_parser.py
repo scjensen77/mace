@@ -570,10 +570,30 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         required=False,
     )
     parser.add_argument(
+        "--kml_nsrbf",
+        help="KMLMACE: carry KML's short-range pair block, nsrbf slots as in "
+        "fit_potential (1 = constant only, i.e. no block; the published K "
+        "fits use 5). The block runs over MACE's neighbour list, so --r_max "
+        "must reach --kml_rcut",
+        type=int,
+        default=1,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_rcut",
+        help="KMLMACE: cutoff of the short-range pair block, in bohr, as the "
+        "K fit's rcut (2.45 in the published fits). Required when "
+        "--kml_nsrbf > 1",
+        type=float,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
         "--kml_include_constant",
-        help="KMLMACE: give the k-space term its own constant energy offset. "
-        "Off by default: --E0s already carries one, and with a single "
-        "species at fixed N the two are the same parameter",
+        help="KMLMACE: give the k-space term its own trainable constant. "
+        "Off by default: --E0s already carries the offset (as a fixed "
+        "buffer, not a parameter), and with a single species at fixed N a "
+        "second constant is a flat direction of the loss",
         type=str2bool,
         default=False,
         required=False,
@@ -584,6 +604,34 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "multiple of --lr",
         type=float,
         default=1.0,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_init_npz",
+        help="KMLMACE: warm-start the plane-wave coefficients from this K "
+        "model.npz (kml.kspace_warm_start: same nup and cutoffs, Ha to eV, "
+        "zero-mean on the training set so --E0s keeps the offset). Needs "
+        "--kml_normalize_features",
+        type=str,
+        default=None,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_freeze",
+        help="KMLMACE: hold the k-space coefficients fixed after the warm "
+        "start (requires --kml_init_npz), so the network trains against a "
+        "fixed K fit: the two-stage residual scheme inside one model, for a "
+        "controlled comparison with the joint fit",
+        type=str2bool,
+        default=False,
+        required=False,
+    )
+    parser.add_argument(
+        "--kml_init_dump",
+        help="KMLMACE: save the built model (after standardization and any "
+        "warm start, before the first optimizer step) to this path",
+        type=str,
+        default=None,
         required=False,
     )
     parser.add_argument(
