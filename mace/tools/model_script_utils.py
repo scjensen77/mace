@@ -218,6 +218,46 @@ def configure_model(
         # on whatever loader it happens to hold.
         modules.set_kspace_feature_statistics(model.kml_kspace, train_loader)
 
+    if isinstance(model, modules.KMLMACE) and getattr(args, "kml_init_npz", None):
+        # Warm start from a K fit, in eV and zero-mean on the training
+        # set: E0s (average of the raw energies) already holds the mean
+        # the K fit's plane-wave block carries, so loading that block with
+        # its own mean would double count it (1490 meV/atom on T1200).
+        if not args.kml_normalize_features:
+            raise ValueError(
+                "--kml_init_npz needs --kml_normalize_features: the warm "
+                "start is made zero-mean through the feature shift"
+            )
+        from kml.model import kspace_warm_start, load_model
+
+        bundle = load_model(args.kml_init_npz, verbose=False)
+        block = model.kml_kspace
+        if block.nsrbf > 1:
+            values = kspace_warm_start(bundle, block.kvdata,
+                                       nsrbf=block.nsrbf, rcut=block.rcut)
+        else:
+            values = kspace_warm_start(bundle, block.kvdata)
+        block.energy.load_coefficients(values)
+        logging.info(
+            f"KML warm start from {args.kml_init_npz}: "
+            f"{values.size} coefficients, |c| max {abs(values).max():.3e} eV"
+        )
+
+    if isinstance(model, modules.KMLMACE) and getattr(args, "kml_freeze", False):
+        # Two-stage inside one model: the K fit stays what it was and the
+        # network fits the rest. Without a warm start the term would be a
+        # frozen zero, which is plain MACE with a dead attribute.
+        if not getattr(args, "kml_init_npz", None):
+            raise ValueError("--kml_freeze needs --kml_init_npz: freezing "
+                             "zero coefficients is plain MACE")
+        for parameter in model.kml_kspace.parameters():
+            parameter.requires_grad_(False)
+        logging.info("KML k-space coefficients frozen at the warm start")
+
+    if isinstance(model, modules.KMLMACE) and getattr(args, "kml_init_dump", None):
+        torch.save(model, args.kml_init_dump)
+        logging.info(f"KMLMACE initial model saved to {args.kml_init_dump}")
+
     if model_foundation is not None:
         if getattr(args, "finetune_dipoles_polarizabilities", False):
             # MDP fine-tuning: dedicated loader that handles higher-order irreps
@@ -273,12 +313,26 @@ def _kml_kspace_arguments(args):
             "specify either --kml_k2cut or the two-tier "
             "--kml_k2cut_pair / --kml_k2cut_triplet, not both"
         )
+    nsrbf = int(getattr(args, "kml_nsrbf", 1) or 1)
+    rcut = getattr(args, "kml_rcut", None)
+    if nsrbf > 1:
+        if rcut is None:
+            raise ValueError("--kml_nsrbf > 1 needs --kml_rcut (bohr)")
+        # The pair sum runs over MACE's neighbour list: an r_max below the
+        # block's cutoff would silently truncate every pair function.
+        rcut_angstrom = float(rcut) * 0.529177210903
+        if float(args.r_max) < rcut_angstrom:
+            raise ValueError(
+                f"--r_max {args.r_max} A does not reach the short-range block's "
+                f"cutoff {rcut} bohr = {rcut_angstrom:.4f} A")
     return dict(
         nup=args.kml_nup,
         k2cut=args.kml_k2cut,
         k2cut_pair=args.kml_k2cut_pair,
         k2cut_triplet=args.kml_k2cut_triplet,
         include_constant=args.kml_include_constant,
+        nsrbf=nsrbf,
+        rcut=rcut,
     )
 
 
@@ -358,6 +412,9 @@ def _build_model(
             interaction_cls_first=modules.interaction_classes[args.interaction_first],
             MLP_irreps=o3.Irreps(args.MLP_irreps),
             atomic_inter_scale=args.std,
+            # Zero, not args.mean: with --E0s average at one species and
+            # uniform N the mean interaction energy is exactly zero, and
+            # any other E0s convention would need this to be args.mean.
             atomic_inter_shift=[0.0] * len(heads),
             radial_MLP=ast.literal_eval(args.radial_MLP),
             radial_type=args.radial_type,
