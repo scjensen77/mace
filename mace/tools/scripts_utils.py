@@ -1034,14 +1034,18 @@ def get_params_options(
     # weights, so the rate that suits the message-passing blocks is not
     # necessarily the one that suits them (--kml_lr_factor).
     if getattr(model, "kml_kspace", None) is not None:
-        param_options["params"].append(
-            {
-                "name": "kml_kspace",
-                "params": list(model.kml_kspace.parameters()),
-                "weight_decay": 0.0,
-                "lr": getattr(args, "kml_lr_factor", 1.0) * args.lr,
-            }
-        )
+        # A frozen term (--kml_freeze) has no trainable parameters, and an
+        # empty group is what the optimizer would refuse.
+        kspace_params = [p for p in model.kml_kspace.parameters() if p.requires_grad]
+        if kspace_params:
+            param_options["params"].append(
+                {
+                    "name": "kml_kspace",
+                    "params": kspace_params,
+                    "weight_decay": 0.0,
+                    "lr": getattr(args, "kml_lr_factor", 1.0) * args.lr,
+                }
+            )
 
     if (
         hasattr(model, "onebody_magmombasis_coeffs")
