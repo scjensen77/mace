@@ -42,6 +42,19 @@ moves. KML_Model pins the tag and the SHA-256 of the five files above
 (`Workflow/mace_fork.py`), so an install whose bytes do not match is
 refused before training.
 
+The first TorchScript error on a `KMLMACE` was a module-level
+`BOHR_PER_ANG` float closed over in `KSpaceLongRangeBlock.forward`
+(`python value of type 'float' cannot be used as a value … closed over
+global`). That constant is now a class `Final[float]`.
+`Can't redefine method: __n_features_getter` is a retry artefact, not
+the cause. Tag this commit `v0.3.17-kml.2` after merge; do not move
+`v0.3.17-kml.1`.
+
+When `--model KMLMACE` is built with the fork defaults `kml_nsrbf==1`
+or `kml_lr_factor==1.0`, `model_script_utils` logs a WARNING: those
+defaults are not the published protocol (nsrbf 5, rcut 2.45 bohr,
+lr_factor 0.1).
+
 The diff against upstream is `git diff 5e524dc kml`. The gates, the
 drivers and the guide are in KML_Model (`tests/kmlmace_fork_check`,
 `Workflow/fit_kml_mace.py`, `docs/source/part2-python/joint-mace.md`).
