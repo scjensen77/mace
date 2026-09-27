@@ -25,7 +25,7 @@ the batch index and the box, and hands back one energy per
 configuration.
 
 ``kml`` is an optional dependency, as ``les`` is for ``MACELES``.  Make
-it importable with ``pip install -e KML_Model`` or put it on PYTHONPATH.
+it importable with ``pip install -e KML_Model`` or on ``PYTHONPATH``.
 
 Limits, both stated where they are enforced:
 
