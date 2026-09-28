@@ -1,5 +1,6 @@
 import ast
 import logging
+import sys
 
 import numpy as np
 import torch
@@ -291,6 +292,19 @@ def _determine_atomic_inter_shift(mean, heads):
     return [0.0] * len(heads)
 
 
+def _argv_named(*flags):
+    """True when one of ``flags`` appears on ``sys.argv`` (CLI spelling).
+
+    ``parse_args(list)`` in tests does not rewrite ``sys.argv``; those
+    callers are not the omitted-flag trap this warning is for.
+    """
+    for flag in flags:
+        for token in sys.argv[1:]:
+            if token == flag or token.startswith(flag + "="):
+                return True
+    return False
+
+
 def _kml_kspace_arguments(args):
     """``KSpaceLongRangeBlock`` arguments from the ``--kml_*`` flags.
 
@@ -315,6 +329,28 @@ def _kml_kspace_arguments(args):
         )
     nsrbf = int(getattr(args, "kml_nsrbf", 1) or 1)
     rcut = getattr(args, "kml_rcut", None)
+    lr_factor = getattr(args, "kml_lr_factor", 1.0)
+    kml_freeze = bool(getattr(args, "kml_freeze", False))
+    # Fork parser defaults (nsrbf=1, lr_factor=1.0) are not the published
+    # protocol. Warn only when the caller left the default in place:
+    # an explicit ``--kml_nsrbf 1`` is a choice, and ``kml_lr_factor``
+    # is unused under ``--kml_freeze``.
+    if nsrbf == 1 and not _argv_named("--kml_nsrbf"):
+        logging.warning(
+            "--model KMLMACE with kml_nsrbf=1 (the fork default) trains a "
+            "k-space-only block, not the published protocol (nsrbf 5, "
+            "rcut 2.45 bohr). Pass --kml_nsrbf 5 --kml_rcut 2.45 to match."
+        )
+    if (
+        not kml_freeze
+        and (lr_factor is None or float(lr_factor) == 1.0)
+        and not _argv_named("--kml_lr_factor")
+    ):
+        logging.warning(
+            "--model KMLMACE with kml_lr_factor=1.0 (the fork default) "
+            "does not scale the k-space learning rate; the published "
+            "protocol uses 0.1. Pass --kml_lr_factor 0.1 to match."
+        )
     if nsrbf > 1:
         if rcut is None:
             raise ValueError("--kml_nsrbf > 1 needs --kml_rcut (bohr)")

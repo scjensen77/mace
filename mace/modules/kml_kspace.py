@@ -37,16 +37,12 @@ Limits, both stated where they are enforced:
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Final, Optional
 
 import torch
 
 from mace.modules.models import ScaleShiftMACE
 from mace.modules.utils import get_outputs, safe_double
-
-
-# MACE positions are in angstrom; KML's pair functions take bohr.
-BOHR_PER_ANG = 1.0 / 0.529177210903   # CODATA 2018, kml/units.py
 
 
 def _import_kml():
@@ -83,7 +79,7 @@ def cubic_side_lengths(
     cells = cell.reshape(num_graphs, 3, 3)
     sides = torch.diagonal(cells, dim1=-2, dim2=-1)  # [n_graphs, 3]
 
-    if bool((sides <= 0).any()):
+    if (sides <= 0).any():
         raise ValueError(
             "the k-space term needs a periodic box on every configuration, "
             "and at least one has a zero or negative lattice vector. A "
@@ -97,7 +93,7 @@ def cubic_side_lengths(
     anisotropy = (
         sides.amax(dim=-1, keepdim=True) - sides.amin(dim=-1, keepdim=True)
     ) / scale
-    worst = float(torch.maximum(skew, anisotropy).max())
+    worst = float(torch.maximum(skew, anisotropy).max().item())
     if worst > tolerance:
         # str(), not a format spec: TorchScript compiles this function and
         # rejects formatting inside an f-string.
@@ -122,7 +118,15 @@ class KSpaceLongRangeBlock(torch.nn.Module):
     fix the basis; the coefficients are the trainable parameters. Pass
     ``k2cut`` for the single-tier (Fortran-equivalent) tables, or the
     pair/triplet pair for two-tier.
+
+    ``BOHR_PER_ANG`` is a class ``Final`` so TorchScript can compile
+    ``forward``. A module-level float is closed over as a Python
+    global and is the first error on ``torch.jit.script`` (KML_Model
+    audit 2026-09-27). CODATA 2018, same literal as ``kml.units``.
     """
+
+    # MACE positions are in angstrom; KML's pair functions take bohr.
+    BOHR_PER_ANG: Final[float] = 1.0 / 0.529177210903
 
     def __init__(
         self,
@@ -193,7 +197,7 @@ class KSpaceLongRangeBlock(torch.nn.Module):
         """Standardized basis features, ``[n_graphs, n_features]``."""
         ell = cubic_side_lengths(cell, num_graphs)
         return self.energy.features(positions, batch, ell, num_graphs,
-                                    edge_index, shifts, BOHR_PER_ANG)
+                                    edge_index, shifts, self.BOHR_PER_ANG)
 
     def forward(
         self,
@@ -207,7 +211,7 @@ class KSpaceLongRangeBlock(torch.nn.Module):
         """``energy[n_graphs]``, in the units the coefficients carry (eV)."""
         ell = cubic_side_lengths(cell, num_graphs)
         return self.energy(positions, batch, ell, num_graphs,
-                           edge_index, shifts, BOHR_PER_ANG)
+                           edge_index, shifts, self.BOHR_PER_ANG)
 
 
 def set_kspace_feature_statistics(
@@ -253,7 +257,7 @@ def set_kspace_feature_statistics(
                 num_graphs,
                 batch.edge_index,
                 batch.shifts,
-                BOHR_PER_ANG,
+                block.BOHR_PER_ANG,
             ).to(torch.float64)
             sums += features.sum(dim=0)
             sums_squared += (features * features).sum(dim=0)
@@ -305,10 +309,26 @@ class KMLMACE(ScaleShiftMACE):
     wrong, not approximate. ``MACECalculator`` asks for a stress, so it
     cannot drive one of these models either.
 
-    ``forward`` delegates to the parent and adds a term, which
-    TorchScript cannot compile (``super().forward`` is unsupported).
-    Training does not care -- the run logs that it skipped the optional
-    ``*_compiled.model``, an artifact MACE v1.0 removes anyway.
+    ``forward`` is written for TorchScript. Two blockers on tag
+    ``v0.3.17-kml.1`` stopped ``mace_run_train`` writing
+    ``*_compiled.model``:
+
+    1. A module-level ``BOHR_PER_ANG`` float closed over in
+       ``KSpaceLongRangeBlock.forward`` (``python value of type
+       'float' cannot be used as a value … closed over global``).
+       Fixed here as a class ``Final[float]``.
+    2. ``super().forward`` in this method (``'Tensor' object has no
+       attribute or method 'forward'``). TorchScript does not resolve
+       ``super`` on a compiled subclass. The parent body is
+       ``ScaleShiftMACE._scale_shift_forward``; this method calls
+       that, not ``super().forward`` or ``ScaleShiftMACE.forward``.
+
+    ``Can't redefine method: __n_features_getter`` is a retry artefact
+    after either of those, not a third cause. A full ``KMLMACE`` then
+    scripts: ``torch.jit.script`` and ``e3nn.util.jit.compile`` succeed,
+    and ``mace_run_train`` writes ``*_compiled.model`` that
+    ``torch.jit.load`` runs. Measured in KML_Model
+    ``kmlmace_fork_check``.
     """
 
     def __init__(self, kml_kspace_arguments: Optional[Dict] = None, **kwargs):
@@ -358,7 +378,11 @@ class KMLMACE(ScaleShiftMACE):
         # still live in this scope, so the forces below are taken once,
         # from the sum. Asking twice would give the k-space term no say
         # in them.
-        outputs = super().forward(
+        # TorchScript cannot resolve super().forward or
+        # ScaleShiftMACE.forward on a compiled subclass. The parent
+        # body lives on _scale_shift_forward so this call is a method
+        # lookup, not a type-object attribute.
+        outputs = self._scale_shift_forward(
             data,
             training=training,
             compute_force=False,
@@ -378,14 +402,25 @@ class KMLMACE(ScaleShiftMACE):
             data["edge_index"], data["shifts"],
         )
 
-        interaction_energy = outputs["interaction_energy"] + kspace_energy
+        interaction_sr = outputs["interaction_energy"]
+        energy_sr = outputs["energy"]
+        if interaction_sr is None or energy_sr is None:
+            raise RuntimeError(
+                "ScaleShiftMACE returned no short-range energy; "
+                "KMLMACE cannot add the k-space term"
+            )
+        interaction_energy = interaction_sr + kspace_energy
+        # TorchScript Dict has no .get; pbc is optional on the graph.
+        pbc: Optional[torch.Tensor] = None
+        if "pbc" in data:
+            pbc = data["pbc"]
         forces, _, _, hessian, _, _ = get_outputs(
             energy=interaction_energy,
             positions=positions,
             displacement=None,
             vectors=None,
             cell=data["cell"],
-            pbc=data.get("pbc"),
+            pbc=pbc,
             training=training,
             compute_force=compute_force,
             compute_virials=False,
@@ -394,13 +429,12 @@ class KMLMACE(ScaleShiftMACE):
             compute_edge_forces=False,
         )
 
-        outputs.update(
-            energy=outputs["energy"] + kspace_energy,
-            interaction_energy=interaction_energy,
-            kspace_energy=safe_double(kspace_energy),
-            forces=forces,
-            hessian=hessian,
-        )
+        # TorchScript Dict has no kwargs update. Assign keys.
+        outputs["energy"] = energy_sr + kspace_energy
+        outputs["interaction_energy"] = interaction_energy
+        outputs["kspace_energy"] = safe_double(kspace_energy)
+        outputs["forces"] = forces
+        outputs["hessian"] = hessian
         # node_energy stays the short-range decomposition: the k-space
         # term is a property of the configuration, not a sum over atoms,
         # and splitting it evenly would invent a per-atom value.
