@@ -220,9 +220,11 @@ def configure_model(
 
     if isinstance(model, modules.KMLMACE) and getattr(args, "kml_init_npz", None):
         # Warm start from a K fit, in eV and zero-mean on the training
-        # set: E0s (average of the raw energies) already holds the mean
-        # the K fit's plane-wave block carries, so loading that block with
-        # its own mean would double count it (1490 meV/atom on T1200).
+        # set: the joint block drops the K fit's constant and centres
+        # the remaining terms, and --E0s (average of the raw energies)
+        # carries the whole mean, so neither part is counted twice.
+        # On T1200 the published fit's mean is -2188.6 meV/atom
+        # (-653.2 constant, -1535.4 other terms).
         if not args.kml_normalize_features:
             raise ValueError(
                 "--kml_init_npz needs --kml_normalize_features: the warm "
@@ -252,7 +254,7 @@ def configure_model(
                              "zero coefficients is plain MACE")
         for parameter in model.kml_kspace.parameters():
             parameter.requires_grad_(False)
-        logging.info("KML k-space coefficients frozen at the warm start")
+        logging.info("every KML coefficient frozen at the warm start")
 
     if isinstance(model, modules.KMLMACE) and getattr(args, "kml_init_dump", None):
         torch.save(model, args.kml_init_dump)

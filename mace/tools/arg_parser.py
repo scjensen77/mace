@@ -618,10 +618,10 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--kml_freeze",
-        help="KMLMACE: hold the k-space coefficients fixed after the warm "
-        "start (requires --kml_init_npz), so the network trains against a "
-        "fixed K fit: the two-stage residual scheme inside one model, for a "
-        "controlled comparison with the joint fit",
+        help="KMLMACE: hold every KML coefficient fixed after the warm "
+        "start (short-range block and k-space; requires --kml_init_npz), so "
+        "the network trains against a fixed K fit: the two-stage residual "
+        "scheme inside one model, for a controlled comparison with the joint fit",
         type=str2bool,
         default=False,
         required=False,
