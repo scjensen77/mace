@@ -167,18 +167,25 @@ def _node_energy_expressions(cls):
     assignments, and the entry is required to be that bare local so nothing
     can be hidden in the second form.
     """
-    source = textwrap.dedent(inspect.getsource(cls.forward))
-    tree = ast.parse(source)
+    # ScaleShiftMACE.forward is a thin TorchScript wrapper; the body that
+    # builds node_energy lives on _scale_shift_forward (kml.2). Scan every
+    # method the class itself defines that is one of those two names.
+    methods = [cls.forward]
+    if "_scale_shift_forward" in vars(cls):
+        methods.append(cls._scale_shift_forward)
     assignments, entries = [], []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "node_energy":
-                    assignments.append(node.value)
-        elif isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values):
-                if isinstance(key, ast.Constant) and key.value == "node_energy":
-                    entries.append(value)
+    for method in methods:
+        source = textwrap.dedent(inspect.getsource(method))
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "node_energy":
+                        assignments.append(node.value)
+            elif isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if isinstance(key, ast.Constant) and key.value == "node_energy":
+                        entries.append(value)
     if not assignments:
         return entries
     for entry in entries:
